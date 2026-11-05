@@ -58,7 +58,7 @@ class MediaPlaceholder extends StatelessWidget {
 
     return Image.asset(
       asset,
-      fit: BoxFit.contain,
+      fit: BoxFit.cover,
       frameBuilder: (
         BuildContext context,
         Widget image,

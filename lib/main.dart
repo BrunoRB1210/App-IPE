@@ -1,14 +1,19 @@
 import 'dart:async';
+import 'dart:ui' show FontFeature;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'audio_analyzer.dart';
+import 'models/recording_entry.dart';
 import 'models/weapon.dart';
 import 'services/audio_capture_service.dart';
+import 'services/recording_history_service.dart';
 import 'theme/app_theme.dart';
+import 'utils/formatters.dart';
 import 'widgets/capture_panel.dart';
+import 'widgets/history_modal.dart';
 import 'widgets/instructions_modal.dart';
 import 'widgets/results_panel.dart';
 import 'widgets/surface_card.dart';
@@ -45,11 +50,14 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late final AudioCaptureService _capture;
+  late final RecordingHistoryService _history;
   final GlobalKey _resultsAnchorKey = GlobalKey();
 
   WeaponProfile _selectedWeapon = kWeaponProfiles.first;
   AnalysisResult? _result;
   String? _sourceLabel;
+  String? _activeWavPath;
+  DateTime _recordedAt = DateTime.now();
   bool _isAnalyzing = false;
   bool _showCharts = false;
 
@@ -58,6 +66,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _capture = AudioCaptureService()..addListener(_handleCaptureUpdate);
+    _history = RecordingHistoryService();
+    unawaited(_history.load());
   }
 
   @override
@@ -66,6 +76,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _capture
       ..removeListener(_handleCaptureUpdate)
       ..dispose();
+    _history.dispose();
     super.dispose();
   }
 
@@ -94,6 +105,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         setState(() {
           _result = null;
           _sourceLabel = null;
+          _activeWavPath = null;
           _showCharts = false;
         });
       }
@@ -122,10 +134,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
 
+    final DateTime captureTime = DateTime.now();
+    final String gdhName = buildGdhWavFileName(
+      weaponName: _selectedWeapon.name,
+      timestamp: captureTime,
+    );
+
     await _analyzeWavFile(
       recordedPath,
-      label: 'Gravação do microfone',
-      deleteAfterAnalysis: true,
+      label: gdhName,
+      timestamp: captureTime,
+      saveToHistoryOnSuccess: true,
+      deleteTempAfterAnalysis: true,
     );
   }
 
@@ -148,7 +168,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       await _analyzeWavFile(
         picked.path!,
         label: picked.name,
-        deleteAfterAnalysis: false,
+        timestamp: DateTime.now(),
+        saveToHistoryOnSuccess: false,
+        deleteTempAfterAnalysis: false,
       );
     } catch (error) {
       if (!mounted) return;
@@ -161,10 +183,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _analyzeWavFile(
     String path, {
     required String label,
-    required bool deleteAfterAnalysis,
+    required DateTime timestamp,
+    required bool saveToHistoryOnSuccess,
+    required bool deleteTempAfterAnalysis,
   }) async {
     if (!mounted) {
-      if (deleteAfterAnalysis) {
+      if (deleteTempAfterAnalysis) {
         await AudioCaptureService.deleteRecording(path);
       }
       return;
@@ -173,14 +197,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     setState(() {
       _isAnalyzing = true;
       _sourceLabel = label;
+      _recordedAt = timestamp;
       _showCharts = false;
     });
 
     try {
       final AnalysisResult result = await AudioAnalyzer.processWavFile(path);
+
+      String finalPath = path;
+      String finalLabel = label;
+      if (saveToHistoryOnSuccess) {
+        try {
+          final RecordingEntry entry = await _history.saveRecording(
+            sourcePath: path,
+            weapon: _selectedWeapon,
+            timestamp: timestamp,
+            result: result,
+          );
+          finalPath = entry.filePath;
+          finalLabel = entry.fileName;
+        } catch (_) {
+          // Mantém o resultado na tela mesmo se o armazenamento local falhar.
+        }
+      }
+
       if (!mounted) return;
       setState(() {
         _result = result;
+        _sourceLabel = finalLabel;
+        _activeWavPath = finalPath;
         _isAnalyzing = false;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -198,9 +243,83 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() => _isAnalyzing = false);
       _showMessage('Erro ao analisar arquivo WAV: $error');
     } finally {
-      if (deleteAfterAnalysis) {
+      if (deleteTempAfterAnalysis) {
         await AudioCaptureService.deleteRecording(path);
       }
+    }
+  }
+
+  Future<void> _saveCurrentWavWithGdh() async {
+    final String? path = _activeWavPath;
+    final AnalysisResult? result = _result;
+    if (path == null || result == null) return;
+
+    try {
+      // Garante que também esteja salvo no histórico interno com GDH
+      final RecordingEntry saved = await _history.saveRecording(
+        sourcePath: path,
+        weapon: _selectedWeapon,
+        timestamp: _recordedAt,
+        result: result,
+      );
+      if (mounted) {
+        setState(() {
+          _activeWavPath = saved.filePath;
+          _sourceLabel = saved.fileName;
+        });
+      }
+
+      final String? exported = await _history.exportWavWithGdh(
+        sourcePath: saved.filePath,
+        weapon: _selectedWeapon,
+        timestamp: _recordedAt,
+      );
+      if (!mounted) return;
+      if (exported != null) {
+        _showMessage('Arquivo salvo com GDH: ${saved.fileName}');
+      } else {
+        _showMessage('Salvo no histórico interno: ${saved.fileName}');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('Não foi possível salvar o arquivo com GDH: $error');
+    }
+  }
+
+  Future<void> _openHistoryEntry(RecordingEntry entry) async {
+    if (_isAnalyzing || _capture.isRecording || _capture.isBusy) return;
+
+    final WeaponProfile matchedWeapon = kWeaponProfiles.firstWhere(
+      (WeaponProfile w) => w.id == entry.weaponId,
+      orElse: () => _selectedWeapon,
+    );
+    setState(() => _selectedWeapon = matchedWeapon);
+
+    await _analyzeWavFile(
+      entry.filePath,
+      label: entry.fileName,
+      timestamp: entry.recordedAt,
+      saveToHistoryOnSuccess: false,
+      deleteTempAfterAnalysis: false,
+    );
+  }
+
+  Future<void> _exportHistoryEntry(RecordingEntry entry) async {
+    final WeaponProfile matchedWeapon = kWeaponProfiles.firstWhere(
+      (WeaponProfile w) => w.id == entry.weaponId,
+      orElse: () => _selectedWeapon,
+    );
+    try {
+      final String? exported = await _history.exportWavWithGdh(
+        sourcePath: entry.filePath,
+        weapon: matchedWeapon,
+        timestamp: entry.recordedAt,
+      );
+      if (!mounted || exported == null) return;
+      _showMessage('Arquivo exportado: ${entry.fileName}');
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('Erro ao exportar gravação: $error');
     }
   }
 
@@ -208,6 +327,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     setState(() {
       _result = null;
       _sourceLabel = null;
+      _activeWavPath = null;
       _showCharts = false;
     });
   }
@@ -240,7 +360,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: _capture,
+      listenable: Listenable.merge(<Listenable>[_capture, _history]),
       builder: (BuildContext context, Widget? _) {
         final bool busy =
             _isAnalyzing || _capture.isRecording || _capture.isBusy;
@@ -254,6 +374,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           },
           child: Scaffold(
             appBar: _ArsenalWaveAppBar(
+              historyCount: _history.entries.length,
+              onOpenHistory: () => showHistoryModal(
+                context,
+                history: _history,
+                onSelectEntry: _openHistoryEntry,
+                onExportEntry: _exportHistoryEntry,
+              ),
               onOpenInstructions: () => showInstructionsModal(context),
             ),
             body: SafeArea(
@@ -289,9 +416,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         const SizedBox(height: AppSpacing.xl),
                         const SectionHeader(
                           step: 'Etapa 2',
-                          title: 'Posicionamento e captura acústica',
+                          title: 'Posicionamento (8 a 15 m) e captura acústica',
                           subtitle:
-                              'Grave pelo microfone em PCM 16-bit ou importe um WAV',
+                              'Grave pelo microfone com salvamento GDH ou importe um WAV',
                         ),
                         CapturePanel(
                           capture: _capture,
@@ -317,10 +444,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             result: _result!,
                             weapon: _selectedWeapon,
                             sourceLabel: _sourceLabel ?? 'Áudio analisado',
+                            recordedAt: _recordedAt,
                             showCharts: _showCharts,
                             onToggleCharts: (bool value) {
                               setState(() => _showCharts = value);
                             },
+                            onSaveWithGdh: _activeWavPath != null
+                                ? _saveCurrentWavWithGdh
+                                : null,
                             onClear: _clearResults,
                           ),
                         ],
@@ -339,8 +470,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
 class _ArsenalWaveAppBar extends StatelessWidget
     implements PreferredSizeWidget {
-  const _ArsenalWaveAppBar({required this.onOpenInstructions});
+  const _ArsenalWaveAppBar({
+    required this.historyCount,
+    required this.onOpenHistory,
+    required this.onOpenInstructions,
+  });
 
+  final int historyCount;
+  final VoidCallback onOpenHistory;
   final VoidCallback onOpenInstructions;
 
   @override
@@ -377,7 +514,7 @@ class _ArsenalWaveAppBar extends StatelessWidget
               color: AppColors.accent,
             ),
           ),
-          const SizedBox(width: AppSpacing.md),
+          const SizedBox(width: AppSpacing.sm + 2),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -390,7 +527,7 @@ class _ArsenalWaveAppBar extends StatelessWidget
                   style: text.titleMedium?.copyWith(letterSpacing: -0.2),
                 ),
                 Text(
-                  'Análise Acústica de Cadência',
+                  'Cadência Acústica',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: text.labelSmall,
@@ -401,6 +538,33 @@ class _ArsenalWaveAppBar extends StatelessWidget
         ],
       ),
       actions: <Widget>[
+        OutlinedButton.icon(
+          onPressed: onOpenHistory,
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size(0, 38),
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.sm + 4,
+              vertical: AppSpacing.sm,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.sm + 2),
+            ),
+            side: const BorderSide(color: AppColors.borderStrong),
+            textStyle: text.labelMedium,
+          ),
+          icon: const Icon(
+            Icons.history_rounded,
+            size: 16,
+            color: AppColors.accent,
+          ),
+          label: Text(
+            historyCount > 0 ? 'Histórico ($historyCount)' : 'Histórico',
+            style: const TextStyle(
+              fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.sm),
         Padding(
           padding: const EdgeInsets.only(right: AppSpacing.lg),
           child: OutlinedButton.icon(
@@ -408,7 +572,7 @@ class _ArsenalWaveAppBar extends StatelessWidget
             style: OutlinedButton.styleFrom(
               minimumSize: const Size(0, 38),
               padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.md,
+                horizontal: AppSpacing.sm + 4,
                 vertical: AppSpacing.sm,
               ),
               shape: RoundedRectangleBorder(

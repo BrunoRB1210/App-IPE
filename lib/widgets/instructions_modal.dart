@@ -112,10 +112,11 @@ class InstructionsModal extends StatelessWidget {
                   _InstructionStepCard(
                     number: '02',
                     icon: Icons.shield_outlined,
-                    title: 'Posicionamento seguro do celular',
+                    title: 'Posicionamento seguro (8 a 15 m)',
                     description:
-                        'Mantenha o aparelho fora do cone de sopro e da linha '
-                        'de tiro para preservar a segurança e evitar saturação '
+                        'Posicione o celular ATRÁS da linha de tiro (na '
+                        'retaguarda do atirador), a uma distância de 8 a 15 '
+                        'metros, preservando a segurança e evitando saturação '
                         'do microfone.',
                     extra: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -11,24 +11,29 @@ import 'metric_tile.dart';
 import 'surface_card.dart';
 
 /// Painel de resultados da análise acústica: prioriza as métricas numéricas
-/// (cadência em TPM e disparos detectados) e oferece controle dinâmico
-/// (`Switch`) para mostrar ou ocultar os gráficos de forma de onda e energia.
+/// (cadência em TPM e disparos detectados), permite salvar/exportar o arquivo
+/// WAV com o GDH e oferece controle dinâmico (`Switch`) para mostrar ou ocultar
+/// os gráficos de forma de onda e energia.
 class ResultsPanel extends StatelessWidget {
   const ResultsPanel({
     super.key,
     required this.result,
     required this.weapon,
     required this.sourceLabel,
+    required this.recordedAt,
     required this.showCharts,
     required this.onToggleCharts,
+    required this.onSaveWithGdh,
     required this.onClear,
   });
 
   final AnalysisResult result;
   final WeaponProfile weapon;
   final String sourceLabel;
+  final DateTime recordedAt;
   final bool showCharts;
   final ValueChanged<bool> onToggleCharts;
+  final VoidCallback? onSaveWithGdh;
   final VoidCallback onClear;
 
   String _formatTpm(double? value) =>
@@ -38,43 +43,103 @@ class ResultsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final TextTheme text = Theme.of(context).textTheme;
     final int shotCount = result.shootingTimes.length;
+    final String gdhCode = formatGdh(recordedAt);
+    final String gdhFileName = buildGdhWavFileName(
+      weaponName: weapon.name,
+      timestamp: recordedAt,
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        // Cabeçalho contextual do ensaio
+        // Cabeçalho contextual do ensaio com GDH e botão Salvar WAV com GDH
         SurfaceCard(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.lg,
-            vertical: AppSpacing.md,
-          ),
-          child: Row(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              Icon(weapon.icon, size: 18, color: AppColors.accent),
-              const SizedBox(width: AppSpacing.sm + 2),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      '${weapon.name} • ${weapon.caliber}',
-                      style: text.titleSmall,
+              Row(
+                children: <Widget>[
+                  Icon(weapon.icon, size: 18, color: AppColors.accent),
+                  const SizedBox(width: AppSpacing.sm + 2),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Row(
+                          children: <Widget>[
+                            Flexible(
+                              child: Text(
+                                '${weapon.name} • ${weapon.caliber}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: text.titleSmall,
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: AppSpacing.sm,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppColors.surfaceRaised,
+                                borderRadius: BorderRadius.circular(
+                                  AppRadius.sm,
+                                ),
+                                border: Border.all(color: AppColors.border),
+                              ),
+                              child: Text(
+                                'GDH $gdhCode',
+                                style: text.labelSmall?.copyWith(
+                                  color: AppColors.accent,
+                                  fontFeatures: const <FontFeature>[
+                                    FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          sourceLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: text.bodySmall,
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      sourceLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.bodySmall,
+                  ),
+                  TextButton.icon(
+                    onPressed: onClear,
+                    icon: const Icon(Icons.refresh_rounded, size: 16),
+                    label: const Text('Limpar'),
+                  ),
+                ],
+              ),
+              if (onSaveWithGdh != null) ...<Widget>[
+                const SizedBox(height: AppSpacing.md),
+                OutlinedButton.icon(
+                  onPressed: onSaveWithGdh,
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(44),
+                    side: BorderSide(
+                      color: AppColors.accent.withValues(alpha: 0.45),
                     ),
-                  ],
+                  ),
+                  icon: const Icon(
+                    Icons.save_alt_rounded,
+                    size: 18,
+                    color: AppColors.accent,
+                  ),
+                  label: Text(
+                    'Salvar WAV com GDH ($gdhFileName)',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
-              TextButton.icon(
-                onPressed: onClear,
-                icon: const Icon(Icons.refresh_rounded, size: 16),
-                label: const Text('Limpar'),
-              ),
+              ],
             ],
           ),
         ),
@@ -244,7 +309,9 @@ class ResultsPanel extends StatelessWidget {
                   scrollDirection: Axis.horizontal,
                   child: Row(
                     children: <Widget>[
-                      for (int i = 0; i < result.shootingTimes.length; i++) ...<Widget>[
+                      for (int i = 0;
+                          i < result.shootingTimes.length;
+                          i++) ...<Widget>[
                         if (i > 0) const SizedBox(width: AppSpacing.sm),
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -303,7 +370,8 @@ class ResultsPanel extends StatelessWidget {
                 child: Icon(
                   Icons.ssid_chart_rounded,
                   size: 18,
-                  color: showCharts ? AppColors.accent : AppColors.textSecondary,
+                  color:
+                      showCharts ? AppColors.accent : AppColors.textSecondary,
                 ),
               ),
               const SizedBox(width: AppSpacing.md),

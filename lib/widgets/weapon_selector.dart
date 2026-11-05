@@ -55,10 +55,10 @@ class WeaponSelector extends StatelessWidget {
           child: Row(
             children: <Widget>[
               SizedBox(
-                width: 68,
+                width: 104,
                 child: MediaPlaceholder(
                   icon: selected.icon,
-                  aspectRatio: 16 / 10,
+                  aspectRatio: 16 / 9,
                   imageAsset: selected.imageAsset,
                   highlighted: true,
                   child: WeaponSilhouette(
@@ -80,9 +80,7 @@ class WeaponSelector extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      selected.imageAsset == null
-                          ? 'Placeholder ilustrativo • ${selected.caliber}'
-                          : selected.caliber,
+                      'Calibre ${selected.caliber}',
                       style: text.bodySmall,
                     ),
                   ],

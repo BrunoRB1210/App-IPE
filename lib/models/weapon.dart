@@ -42,6 +42,7 @@ const List<WeaponProfile> kWeaponProfiles = <WeaponProfile>[
     caliber: '7,62×51 mm',
     icon: Icons.gps_fixed,
     silhouette: WeaponSilhouetteKind.fal,
+    imageAsset: 'assets/images/fal.png',
   ),
   WeaponProfile(
     id: 'parafal',
@@ -50,6 +51,7 @@ const List<WeaponProfile> kWeaponProfiles = <WeaponProfile>[
     caliber: '7,62×51 mm',
     icon: Icons.my_location,
     silhouette: WeaponSilhouetteKind.parafal,
+    imageAsset: 'assets/images/parafal.png',
   ),
   WeaponProfile(
     id: 'ia2',
@@ -58,6 +60,7 @@ const List<WeaponProfile> kWeaponProfiles = <WeaponProfile>[
     caliber: '5,56 / 7,62 mm',
     icon: Icons.adjust,
     silhouette: WeaponSilhouetteKind.ia2,
+    imageAsset: 'assets/images/ia2.png',
   ),
   WeaponProfile(
     id: 'mag',
@@ -66,6 +69,7 @@ const List<WeaponProfile> kWeaponProfiles = <WeaponProfile>[
     caliber: '7,62×51 mm',
     icon: Icons.track_changes,
     silhouette: WeaponSilhouetteKind.mag,
+    imageAsset: 'assets/images/mag.png',
   ),
   WeaponProfile(
     id: 'outro',

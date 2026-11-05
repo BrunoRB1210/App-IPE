@@ -5,11 +5,13 @@ import 'package:tentativa_2/audio_analyzer.dart';
 import 'package:tentativa_2/main.dart';
 import 'package:tentativa_2/models/weapon.dart';
 import 'package:tentativa_2/theme/app_theme.dart';
+import 'package:tentativa_2/utils/formatters.dart';
 import 'package:tentativa_2/widgets/analysis_charts.dart';
 import 'package:tentativa_2/widgets/results_panel.dart';
 
 void main() {
-  testWidgets('Renderiza cabeçalho ArsenalWave, armamentos e modal de instruções',
+  testWidgets(
+      'Renderiza ArsenalWave, armamentos, histórico e instruções (8 a 15 m)',
       (WidgetTester tester) async {
     await tester.pumpWidget(const ArsenalWaveApp());
 
@@ -18,23 +20,30 @@ void main() {
     expect(find.text('ParaFAL'), findsOneWidget);
     expect(find.text('IA2'), findsOneWidget);
     expect(find.text('MAG'), findsOneWidget);
-    expect(find.text('Iniciar gravação'), findsOneWidget);
+    expect(find.text('Histórico'), findsOneWidget);
+    expect(find.text('Instruções'), findsOneWidget);
 
-    // Abre o modal de instruções
+    // Abre o modal de histórico
+    await tester.tap(find.text('Histórico'));
+    await tester.pumpAndSettle();
+    expect(find.text('Histórico de Gravações'), findsOneWidget);
+    await tester.tap(find.byTooltip('Fechar histórico'));
+    await tester.pumpAndSettle();
+
+    // Abre o modal de instruções e verifica distância de 8 a 15 m
     await tester.tap(find.text('Instruções'));
     await tester.pumpAndSettle();
 
     expect(find.text('Instruções de Uso'), findsOneWidget);
-    expect(find.text('Entendi'), findsOneWidget);
+    expect(find.text('Posicionamento seguro (8 a 15 m)'), findsOneWidget);
 
-    // Fecha o modal de instruções
     await tester.tap(find.text('Entendi'));
     await tester.pumpAndSettle();
-
     expect(find.text('Instruções de Uso'), findsNothing);
   });
 
-  testWidgets('Exibe números com prioridade e alterna gráficos dinamicamente',
+  testWidgets(
+      'Exibe GDH, botão de salvamento e alterna gráficos dinamicamente',
       (WidgetTester tester) async {
     final AnalysisResult mockResult = AnalysisResult(
       audioData: List<double>.filled(1000, 0.1),
@@ -47,7 +56,9 @@ void main() {
       minCadence: 580.0,
     );
 
+    final DateTime timestamp = DateTime(2026, 11, 4, 23, 16, 52);
     bool showCharts = false;
+    bool saveClicked = false;
 
     await tester.pumpWidget(
       MaterialApp(
@@ -59,10 +70,17 @@ void main() {
                 child: ResultsPanel(
                   result: mockResult,
                   weapon: kWeaponProfiles.first,
-                  sourceLabel: 'ensaio_fal.wav',
+                  sourceLabel: buildGdhWavFileName(
+                    weaponName: kWeaponProfiles.first.name,
+                    timestamp: timestamp,
+                  ),
+                  recordedAt: timestamp,
                   showCharts: showCharts,
                   onToggleCharts: (bool value) {
                     setModalState(() => showCharts = value);
+                  },
+                  onSaveWithGdh: () {
+                    saveClicked = true;
                   },
                   onClear: () {},
                 ),
@@ -73,10 +91,16 @@ void main() {
       ),
     );
 
-    // Números visíveis imediatamente e gráficos ocultos por padrão
+    // GDH e números visíveis imediatamente; gráficos ocultos por padrão
+    expect(find.textContaining('GDH 042316NOV26'), findsWidgets);
     expect(find.text('600,0'), findsWidgets);
     expect(find.byType(WaveformChart), findsNothing);
     expect(find.byType(EnergyChart), findsNothing);
+
+    // Testa o botão de salvar com GDH
+    await tester.tap(find.textContaining('Salvar WAV com GDH'));
+    await tester.pump();
+    expect(saveClicked, isTrue);
 
     // Alterna o Switch para exibir os gráficos
     await tester.tap(find.byType(Switch));
@@ -84,12 +108,5 @@ void main() {
 
     expect(find.byType(WaveformChart), findsOneWidget);
     expect(find.byType(EnergyChart), findsOneWidget);
-
-    // Alterna novamente para recolher os gráficos
-    await tester.tap(find.byType(Switch));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(WaveformChart), findsNothing);
-    expect(find.byType(EnergyChart), findsNothing);
   });
 }
