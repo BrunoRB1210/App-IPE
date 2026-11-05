@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Captura acustica pelo microfone (necessaria para solicitar a permissao em tempo de execucao). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+
     <application
-        android:label="tentativa_2"
+        android:label="ArsenalWave"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

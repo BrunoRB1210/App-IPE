@@ -7,7 +7,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Tentativa 2</string>
+	<string>ArsenalWave</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>O ArsenalWave usa o microfone para gravar os disparos e calcular a cadência de tiro.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
