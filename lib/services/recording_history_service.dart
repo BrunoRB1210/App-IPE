@@ -133,12 +133,12 @@ class RecordingHistoryService extends ChangeNotifier {
       timestamp: timestamp,
     );
 
-    final String? targetPath = await FilePicker.saveFile(
+    final Uri? targetUri = await FilePicker.saveFile(
       dialogTitle: 'Salvar gravação WAV com GDH',
       fileName: fileName,
       bytes: bytes,
     );
-    return targetPath;
+    return targetUri?.toString();
   }
 
   /// Remove uma gravação específica do histórico e apaga seu arquivo WAV local.
