@@ -24,6 +24,15 @@ class WaveformChart extends StatelessWidget {
       spots.add(FlSpot(t, r.audioData[i]));
     }
 
+    if (spots.isEmpty) {
+      return Center(
+        child: Text(
+          'Amostra insuficiente para exibir a forma de onda.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      );
+    }
+
     return LineChart(
       LineChartData(
         gridData: const FlGridData(show: true),
@@ -81,6 +90,15 @@ class EnergyChart extends StatelessWidget {
     for (int i = 0; i < r.frameEnergy.length; i += step) {
       double t = i * frameDuration;
       spots.add(FlSpot(t, r.frameEnergy[i]));
+    }
+
+    if (spots.isEmpty) {
+      return Center(
+        child: Text(
+          'Amostra insuficiente para exibir a energia por janela.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      );
     }
 
     return LineChart(

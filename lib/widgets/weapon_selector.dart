@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import '../models/weapon.dart';
 import '../theme/app_theme.dart';
 import 'media_placeholder.dart';
+import 'surface_card.dart';
+import 'weapon_silhouette.dart';
 
-/// Carrossel horizontal de seleção do armamento (somente UI).
+/// Seletor visual de armamento (FAL, ParaFAL, IA2, MAG, Outro) com espaços
+/// padronizados de imagem/placeholder. Apenas identificação visual na UI.
 class WeaponSelector extends StatelessWidget {
   const WeaponSelector({
     super.key,
@@ -21,6 +24,7 @@ class WeaponSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final TextTheme text = Theme.of(context).textTheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
@@ -43,21 +47,66 @@ class WeaponSelector extends StatelessWidget {
           ),
         ),
         const SizedBox(height: AppSpacing.md),
-        Row(
-          children: <Widget>[
-            const Icon(
-              Icons.info_outline,
-              size: 16,
-              color: AppColors.textMuted,
-            ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Text(
-                selected.description,
-                style: Theme.of(context).textTheme.bodySmall,
+        SurfaceCard(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.sm + 2,
+          ),
+          child: Row(
+            children: <Widget>[
+              SizedBox(
+                width: 68,
+                child: MediaPlaceholder(
+                  icon: selected.icon,
+                  aspectRatio: 16 / 10,
+                  imageAsset: selected.imageAsset,
+                  highlighted: true,
+                  child: WeaponSilhouette(
+                    kind: selected.silhouette,
+                    highlighted: true,
+                  ),
+                ),
               ),
-            ),
-          ],
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      selected.fullName,
+                      style: text.titleSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      selected.imageAsset == null
+                          ? 'Placeholder ilustrativo • ${selected.caliber}'
+                          : selected.caliber,
+                      style: text.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.sm,
+                  vertical: AppSpacing.xs,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceRaised,
+                  borderRadius: BorderRadius.circular(AppRadius.sm),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Text(
+                  selected.caliber,
+                  style: text.labelSmall?.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -72,7 +121,7 @@ class _WeaponCard extends StatelessWidget {
     required this.onTap,
   });
 
-  static const double _width = 128;
+  static const double _width = 136;
 
   final WeaponProfile weapon;
   final bool selected;
@@ -82,6 +131,7 @@ class _WeaponCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final BorderRadius radius = BorderRadius.circular(AppRadius.lg);
+    final TextTheme text = Theme.of(context).textTheme;
     return Semantics(
       button: true,
       selected: selected,
@@ -113,8 +163,13 @@ class _WeaponCard extends StatelessWidget {
                   children: <Widget>[
                     MediaPlaceholder(
                       icon: weapon.icon,
+                      aspectRatio: 16 / 10,
                       imageAsset: weapon.imageAsset,
                       highlighted: selected,
+                      child: WeaponSilhouette(
+                        kind: weapon.silhouette,
+                        highlighted: selected,
+                      ),
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     Row(
@@ -124,7 +179,7 @@ class _WeaponCard extends StatelessWidget {
                             weapon.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleSmall,
+                            style: text.titleSmall,
                           ),
                         ),
                         AnimatedOpacity(
@@ -137,6 +192,13 @@ class _WeaponCard extends StatelessWidget {
                           ),
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      weapon.caliber,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.labelSmall,
                     ),
                   ],
                 ),

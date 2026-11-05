@@ -1,61 +1,78 @@
 import 'package:flutter/material.dart';
 
-/// Perfil de armamento exibido na interface.
+/// Tipo de silhueta vetorial minimalista exibida no placeholder quando nenhuma
+/// imagem externa (`imageAsset`) estiver configurada.
+enum WeaponSilhouetteKind { fal, parafal, ia2, mag, generic }
+
+/// Perfil visual de armamento para identificação do ensaio na interface.
 ///
-/// É um dado puramente de apresentação: identifica o ensaio na tela de
-/// resultados e NÃO altera nenhum parâmetro do analisador de áudio.
+/// Dado estritamente de apresentação (UI): NÃO altera nenhum parâmetro, filtro
+/// ou cálculo do analisador de áudio (`AudioAnalyzer`).
 @immutable
 class WeaponProfile {
   const WeaponProfile({
     required this.id,
     required this.name,
-    required this.description,
+    required this.fullName,
+    required this.caliber,
     required this.icon,
+    required this.silhouette,
     this.imageAsset,
   });
 
   final String id;
   final String name;
-  final String description;
-
-  /// Ícone vetorial usado como ilustração enquanto não houver imagem.
+  final String fullName;
+  final String caliber;
   final IconData icon;
+  final WeaponSilhouetteKind silhouette;
 
-  /// Caminho opcional de uma ilustração (ex.: `assets/weapons/fuzil.png`).
-  /// Para usar, declare o arquivo na seção `assets` do `pubspec.yaml`.
+  /// Caminho opcional para imagem externa (ex.: `'assets/weapons/fal.png'`).
+  /// Caso seja `null` ou falhe ao carregar, o placeholder vetorial padronizado
+  /// mantém o layout íntegro.
   final String? imageAsset;
 }
 
-/// Catálogo de armamentos disponíveis para seleção.
+/// Catálogo de armamentos do ArsenalWave.
 const List<WeaponProfile> kWeaponProfiles = <WeaponProfile>[
   WeaponProfile(
-    id: 'fuzil',
-    name: 'Fuzil',
-    description: 'Fuzil automático / de assalto',
+    id: 'fal',
+    name: 'FAL',
+    fullName: 'Fuzil 7,62 mm M964 (FAL)',
+    caliber: '7,62×51 mm',
     icon: Icons.gps_fixed,
+    silhouette: WeaponSilhouetteKind.fal,
   ),
   WeaponProfile(
-    id: 'metralhadora',
-    name: 'Metralhadora',
-    description: 'Metralhadora leve ou média',
-    icon: Icons.track_changes,
-  ),
-  WeaponProfile(
-    id: 'submetralhadora',
-    name: 'Submetralhadora',
-    description: 'Submetralhadora / pistola-metralhadora',
-    icon: Icons.adjust,
-  ),
-  WeaponProfile(
-    id: 'pistola',
-    name: 'Pistola',
-    description: 'Pistola semiautomática ou automática',
+    id: 'parafal',
+    name: 'ParaFAL',
+    fullName: 'Fuzil 7,62 mm M964A1 (ParaFAL)',
+    caliber: '7,62×51 mm',
     icon: Icons.my_location,
+    silhouette: WeaponSilhouetteKind.parafal,
+  ),
+  WeaponProfile(
+    id: 'ia2',
+    name: 'IA2',
+    fullName: 'Fuzil de Assalto IMBEL IA2',
+    caliber: '5,56 / 7,62 mm',
+    icon: Icons.adjust,
+    silhouette: WeaponSilhouetteKind.ia2,
+  ),
+  WeaponProfile(
+    id: 'mag',
+    name: 'MAG',
+    fullName: 'Metralhadora FN MAG M971',
+    caliber: '7,62×51 mm',
+    icon: Icons.track_changes,
+    silhouette: WeaponSilhouetteKind.mag,
   ),
   WeaponProfile(
     id: 'outro',
     name: 'Outro',
-    description: 'Armamento não listado',
+    fullName: 'Outro Armamento (Ensaio Geral)',
+    caliber: 'Padrão WAV',
     icon: Icons.tune,
+    silhouette: WeaponSilhouetteKind.generic,
   ),
 ];

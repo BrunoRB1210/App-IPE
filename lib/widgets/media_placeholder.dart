@@ -46,13 +46,12 @@ class MediaPlaceholder extends StatelessWidget {
   }
 
   Widget _buildContent() {
-    final Widget fallback = _IconFallback(
-      icon: icon,
-      label: label,
-      highlighted: highlighted,
-    );
-
-    if (child != null) return child!;
+    final Widget fallback = child ??
+        _IconFallback(
+          icon: icon,
+          label: label,
+          highlighted: highlighted,
+        );
 
     final String? asset = imageAsset;
     if (asset == null) return fallback;

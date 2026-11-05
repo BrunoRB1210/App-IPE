@@ -17,15 +17,21 @@ const List<String> kPositioningTips = <String>[
 /// Ilustração vetorial do posicionamento do dispositivo em relação à arma,
 /// exibida dentro de um [MediaPlaceholder] de proporção fixa.
 class PositioningDiagram extends StatelessWidget {
-  const PositioningDiagram({super.key, this.aspectRatio = 16 / 9});
+  const PositioningDiagram({
+    super.key,
+    this.aspectRatio = 16 / 9,
+    this.imageAsset,
+  });
 
   final double aspectRatio;
+  final String? imageAsset;
 
   @override
   Widget build(BuildContext context) {
     return MediaPlaceholder(
       icon: Icons.phone_android,
       aspectRatio: aspectRatio,
+      imageAsset: imageAsset,
       label: 'Posicionamento do dispositivo',
       child: Semantics(
         label: 'Diagrama: celular posicionado ao lado e atrás da boca do cano, '

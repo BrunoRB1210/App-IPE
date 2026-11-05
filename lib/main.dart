@@ -1,24 +1,36 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:record/record.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'audio_analyzer.dart';
+import 'models/weapon.dart';
+import 'services/audio_capture_service.dart';
+import 'theme/app_theme.dart';
+import 'widgets/capture_panel.dart';
+import 'widgets/instructions_modal.dart';
+import 'widgets/results_panel.dart';
+import 'widgets/surface_card.dart';
+import 'widgets/weapon_selector.dart';
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const ArsenalWaveApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+/// Alias mantido para compatibilidade com importações existentes de `MyApp`.
+typedef MyApp = ArsenalWaveApp;
+
+class ArsenalWaveApp extends StatelessWidget {
+  const ArsenalWaveApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Análise de Disparos',
+      title: 'ArsenalWave',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(),
+      theme: buildAppTheme(),
       home: const HomeScreen(),
     );
   }
@@ -31,367 +43,429 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  AnalysisResult? _result;
-  bool _isLoading = false;
-  String? _fileName;
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  late final AudioCaptureService _capture;
+  final GlobalKey _resultsAnchorKey = GlobalKey();
 
-  // Controlador de gravação
-  late final AudioRecorder _audioRecorder;
-  bool _isRecording = false;
+  WeaponProfile _selectedWeapon = kWeaponProfiles.first;
+  AnalysisResult? _result;
+  String? _sourceLabel;
+  bool _isAnalyzing = false;
+  bool _showCharts = false;
 
   @override
   void initState() {
     super.initState();
-    _audioRecorder = AudioRecorder();
+    WidgetsBinding.instance.addObserver(this);
+    _capture = AudioCaptureService()..addListener(_handleCaptureUpdate);
   }
 
   @override
   void dispose() {
-    _audioRecorder.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    _capture
+      ..removeListener(_handleCaptureUpdate)
+      ..dispose();
     super.dispose();
   }
 
-  /// Seleciona um arquivo WAV existente
-  Future<void> _pickAndProcessFile() async {
-    PlatformFile? picked = await FilePicker.pickFile(
-      type: FileType.custom,
-      allowedExtensions: ['wav'],
-    );
-
-    if (picked != null && picked.path != null) {
-      await _processFile(picked.path!, picked.name);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Libera imediatamente o microfone caso a engine seja encerrada pelo SO.
+    if (state == AppLifecycleState.detached && _capture.isRecording) {
+      unawaited(_capture.cancel());
     }
   }
 
-  /// Inicia ou para a gravação de áudio em PCM Raw / Sem DSP
-  Future<void> _toggleRecording() async {
+  void _handleCaptureUpdate() {
+    final String? interruption = _capture.consumeInterruptionMessage();
+    if (interruption != null && mounted) {
+      _showMessage(interruption);
+    }
+  }
+
+  Future<void> _startRecording() async {
+    if (_isAnalyzing || _capture.isBusy || _capture.isRecording) return;
+
     try {
-      if (_isRecording) {
-        // Parar a gravação
-        final path = await _audioRecorder.stop();
-        setState(() => _isRecording = false);
-
-        if (path != null) {
-          await _processFile(path, 'audio_gravado.wav');
-        }
-      } else {
-        // Verificar e solicitar permissão de microfone
-        if (await _audioRecorder.hasPermission()) {
-          final dir = await getTemporaryDirectory();
-          final filePath =
-              '${dir.path}/audio_disparos_${DateTime.now().millisecondsSinceEpoch}.wav';
-
-          await _audioRecorder.start(
-            const RecordConfig(
-              encoder: AudioEncoder
-                  .pcm16bits, // PCM 16-bit nativo sem perda/compressão
-              sampleRate: 44100, // Amostragem de 44.1 kHz
-              numChannels: 2, // Estéreo (use 1 caso prefira Mono)
-              autoGain: false, // Desativa Ganho Automático (AGC)
-              echoCancel: false, // Desativa Cancelamento de Eco
-              noiseSuppress: false, // Desativa Supressão de Ruído
-              // Configurações do Android: força áudio cru (UNPROCESSED)
-              androidConfig: AndroidRecordConfig(
-                audioSource: AndroidAudioSource.unprocessed,
-              ),
-
-              // Configurações do iOS: modo de medição (MEASUREMENT) para evitar DSP de voz
-              iosConfig: IosRecordConfig(),
-            ),
-            path: filePath,
-          );
-
-          setState(() {
-            _isRecording = true;
-            _result = null; // Limpa resultado anterior
-          });
-        }
+      await _capture.start();
+      if (!mounted) return;
+      if (_capture.isRecording) {
+        setState(() {
+          _result = null;
+          _sourceLabel = null;
+          _showCharts = false;
+        });
       }
-    } catch (e) {
-      setState(() {
-        _isRecording = false;
-        _isLoading = false;
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Erro na gravação: $e')));
-      }
+    } on CaptureException catch (error) {
+      if (!mounted) return;
+      _showCaptureError(error);
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('Erro inesperado ao iniciar gravação: $error');
     }
   }
 
-  /// Processa o arquivo de áudio (seja gravado ou escolhido)
-  Future<void> _processFile(String path, String name) async {
+  Future<void> _stopAndAnalyze() async {
+    if (!_capture.isRecording) return;
+
+    String? recordedPath;
+    try {
+      recordedPath = await _capture.stop();
+    } on CaptureException catch (error) {
+      if (!mounted) return;
+      _showCaptureError(error);
+      return;
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('Erro ao encerrar gravação: $error');
+      return;
+    }
+
+    await _analyzeWavFile(
+      recordedPath,
+      label: 'Gravação do microfone',
+      deleteAfterAnalysis: true,
+    );
+  }
+
+  Future<void> _cancelRecording() async {
+    await _capture.cancel();
+    if (!mounted) return;
+    _showMessage('Gravação cancelada.');
+  }
+
+  Future<void> _pickAndAnalyzeFile() async {
+    if (_isAnalyzing || _capture.isRecording || _capture.isBusy) return;
+
+    try {
+      final PlatformFile? picked = await FilePicker.pickFile(
+        type: FileType.custom,
+        allowedExtensions: <String>['wav'],
+      );
+      if (picked == null || picked.path == null) return;
+
+      await _analyzeWavFile(
+        picked.path!,
+        label: picked.name,
+        deleteAfterAnalysis: false,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('Não foi possível abrir o seletor de arquivos: $error');
+    }
+  }
+
+  /// Entrega o arquivo WAV diretamente ao `AudioAnalyzer.processWavFile`,
+  /// preservando integralmente o contrato de entrada e saída do módulo DSP.
+  Future<void> _analyzeWavFile(
+    String path, {
+    required String label,
+    required bool deleteAfterAnalysis,
+  }) async {
+    if (!mounted) {
+      if (deleteAfterAnalysis) {
+        await AudioCaptureService.deleteRecording(path);
+      }
+      return;
+    }
+
     setState(() {
-      _isLoading = true;
-      _fileName = name;
+      _isAnalyzing = true;
+      _sourceLabel = label;
+      _showCharts = false;
     });
 
     try {
-      final result = await AudioAnalyzer.processWavFile(path);
+      final AnalysisResult result = await AudioAnalyzer.processWavFile(path);
+      if (!mounted) return;
       setState(() {
         _result = result;
-        _isLoading = false;
+        _isAnalyzing = false;
       });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Erro ao analisar arquivo: $e')));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final BuildContext? anchor = _resultsAnchorKey.currentContext;
+        if (anchor != null) {
+          Scrollable.ensureVisible(
+            anchor,
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeOutCubic,
+          );
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isAnalyzing = false);
+      _showMessage('Erro ao analisar arquivo WAV: $error');
+    } finally {
+      if (deleteAfterAnalysis) {
+        await AudioCaptureService.deleteRecording(path);
       }
     }
+  }
+
+  void _clearResults() {
+    setState(() {
+      _result = null;
+      _sourceLabel = null;
+      _showCharts = false;
+    });
+  }
+
+  void _showCaptureError(CaptureException error) {
+    final bool denied = error.kind == CaptureErrorKind.permissionDenied;
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(error.message),
+        action: denied
+            ? SnackBarAction(
+                label: 'Configurações',
+                onPressed: () {
+                  unawaited(openAppSettings());
+                },
+              )
+            : null,
+      ),
+    );
+  }
+
+  void _showMessage(String message) {
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Análise de Disparos'),
-        centerTitle: true,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            // Botões de Ação lado a lado (Selecionar Arquivo vs Gravar Áudio)
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: (_isLoading || _isRecording)
-                        ? null
-                        : _pickAndProcessFile,
-                    icon: const Icon(Icons.audio_file),
-                    label: Text(_fileName ?? 'Arquivo WAV'),
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+    return ListenableBuilder(
+      listenable: _capture,
+      builder: (BuildContext context, Widget? _) {
+        final bool busy =
+            _isAnalyzing || _capture.isRecording || _capture.isBusy;
+
+        return PopScope(
+          canPop: !_capture.isRecording && !_capture.isBusy,
+          onPopInvokedWithResult: (bool didPop, Object? _) {
+            if (!didPop && _capture.isRecording) {
+              unawaited(_cancelRecording());
+            }
+          },
+          child: Scaffold(
+            appBar: _ArsenalWaveAppBar(
+              onOpenInstructions: () => showInstructionsModal(context),
+            ),
+            body: SafeArea(
+              top: false,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 680),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.lg,
+                      AppSpacing.lg,
+                      AppSpacing.lg,
+                      AppSpacing.xxl,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        const SectionHeader(
+                          step: 'Etapa 1',
+                          title: 'Armamento do ensaio',
+                          subtitle:
+                              'Identifique o armamento avaliado (FAL, ParaFAL, IA2, MAG)',
+                        ),
+                        WeaponSelector(
+                          weapons: kWeaponProfiles,
+                          selected: _selectedWeapon,
+                          enabled: !busy,
+                          onSelected: (WeaponProfile weapon) {
+                            setState(() => _selectedWeapon = weapon);
+                          },
+                        ),
+                        const SizedBox(height: AppSpacing.xl),
+                        const SectionHeader(
+                          step: 'Etapa 2',
+                          title: 'Posicionamento e captura acústica',
+                          subtitle:
+                              'Grave pelo microfone em PCM 16-bit ou importe um WAV',
+                        ),
+                        CapturePanel(
+                          capture: _capture,
+                          isProcessing: _isAnalyzing,
+                          onStart: _startRecording,
+                          onStop: _stopAndAnalyze,
+                          onCancel: _cancelRecording,
+                          onImport: _pickAndAnalyzeFile,
+                        ),
+                        if (_isAnalyzing) ...<Widget>[
+                          const SizedBox(height: AppSpacing.xl),
+                          _ProcessingCard(sourceLabel: _sourceLabel),
+                        ] else if (_result != null) ...<Widget>[
+                          const SizedBox(height: AppSpacing.xl),
+                          SectionHeader(
+                            key: _resultsAnchorKey,
+                            step: 'Etapa 3',
+                            title: 'Resultados de cadência',
+                            subtitle:
+                                'Métricas em tiros por minuto (TPM) e detecção de picos',
+                          ),
+                          ResultsPanel(
+                            result: _result!,
+                            weapon: _selectedWeapon,
+                            sourceLabel: _sourceLabel ?? 'Áudio analisado',
+                            showCharts: _showCharts,
+                            onToggleCharts: (bool value) {
+                              setState(() => _showCharts = value);
+                            },
+                            onClear: _clearResults,
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isLoading ? null : _toggleRecording,
-                    icon: Icon(_isRecording ? Icons.stop : Icons.mic),
-                    label: Text(_isRecording ? 'Parar' : 'Gravar Áudio'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isRecording ? Colors.red : Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ArsenalWaveAppBar extends StatelessWidget
+    implements PreferredSizeWidget {
+  const _ArsenalWaveAppBar({required this.onOpenInstructions});
+
+  final VoidCallback onOpenInstructions;
+
+  @override
+  Size get preferredSize => const Size.fromHeight(64);
+
+  @override
+  Widget build(BuildContext context) {
+    final TextTheme text = Theme.of(context).textTheme;
+    return AppBar(
+      toolbarHeight: 64,
+      backgroundColor: AppColors.background,
+      surfaceTintColor: Colors.transparent,
+      scrolledUnderElevation: 0,
+      bottom: const PreferredSize(
+        preferredSize: Size.fromHeight(1),
+        child: Divider(height: 1),
+      ),
+      titleSpacing: AppSpacing.lg,
+      title: Row(
+        children: <Widget>[
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: AppColors.accent.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+              border: Border.all(
+                color: AppColors.accent.withValues(alpha: 0.35),
+              ),
+            ),
+            child: const Icon(
+              Icons.graphic_eq_rounded,
+              size: 18,
+              color: AppColors.accent,
+            ),
+          ),
+          const SizedBox(width: AppSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(
+                  'ArsenalWave',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.titleMedium?.copyWith(letterSpacing: -0.2),
+                ),
+                Text(
+                  'Análise Acústica de Cadência',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.labelSmall,
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-
-            // Indicador de Gravação Ativa
-            if (_isRecording)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 16.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.fiber_manual_record, color: Colors.red),
-                    SizedBox(width: 8),
-                    Text('Gravando áudio... Dispare próximo ao microfone.'),
-                  ],
-                ),
-              ),
-
-            // Conteúdo Principal / Carregamento
-            if (_isLoading)
-              const Expanded(
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 12),
-                      Text('Analisando sinal de áudio...'),
-                    ],
-                  ),
-                ),
-              )
-            else if (_result != null) ...[
-              _buildStatsCard(),
-              const SizedBox(height: 16),
-              Expanded(
-                child: ListView(
-                  children: [
-                    const Text(
-                      '1. Áudio e Marcadores de Disparos',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(height: 200, child: _buildWaveformChart()),
-                    const SizedBox(height: 24),
-                    const Text(
-                      '2. Energia por Janela e Limiar',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(height: 200, child: _buildEnergyChart()),
-                  ],
-                ),
-              ),
-            ] else
-              const Expanded(
-                child: Center(
-                  child: Text(
-                    'Selecione um arquivo WAV ou grave um áudio para começar.',
-                  ),
-                ),
-              ),
-          ],
-        ),
+          ),
+        ],
       ),
-    );
-  }
-
-  Widget _buildStatsCard() {
-    final r = _result!;
-    return Card(
-      color: Colors.grey[900],
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            Text(
-              'Disparos Detectados: ${r.shootingTimes.length}',
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.redAccent,
+      actions: <Widget>[
+        Padding(
+          padding: const EdgeInsets.only(right: AppSpacing.lg),
+          child: OutlinedButton.icon(
+            onPressed: onOpenInstructions,
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size(0, 38),
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.md,
+                vertical: AppSpacing.sm,
               ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.sm + 2),
+              ),
+              side: const BorderSide(color: AppColors.borderStrong),
+              textStyle: text.labelMedium,
             ),
-            const Divider(height: 20),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _statItem('Cadência Máx', r.maxCadence),
-                _statItem('Cadência Média', r.meanCadence),
-                _statItem('Cadência Mín', r.minCadence),
-              ],
+            icon: const Icon(
+              Icons.help_outline_rounded,
+              size: 16,
+              color: AppColors.accent,
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _statItem(String label, double? val) {
-    return Column(
-      children: [
-        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
-        const SizedBox(height: 4),
-        Text(
-          val != null ? '${val.toStringAsFixed(1)}\ntiros/min' : '--',
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+            label: const Text('Instruções'),
+          ),
         ),
       ],
     );
   }
+}
 
-  Widget _buildWaveformChart() {
-    final r = _result!;
-    int step = (r.audioData.length / 500).clamp(1, double.infinity).toInt();
-    List<FlSpot> spots = [];
-    for (int i = 0; i < r.audioData.length; i += step) {
-      double t = i / r.sampleRate;
-      spots.add(FlSpot(t, r.audioData[i]));
-    }
+class _ProcessingCard extends StatelessWidget {
+  const _ProcessingCard({required this.sourceLabel});
 
-    return LineChart(
-      LineChartData(
-        gridData: const FlGridData(show: true),
-        titlesData: const FlTitlesData(show: false),
-        borderData: FlBorderData(show: true),
-        lineBarsData: [
-          LineChartBarData(
-            spots: spots,
-            isCurved: false,
-            color: Colors.lightBlueAccent,
-            barWidth: 1,
-            dotData: const FlDotData(show: false),
-          ),
-          LineChartBarData(
-            spots: r.shootingTimes.map((t) => FlSpot(t, 0.9)).toList(),
-            isCurved: false,
-            color: Colors.red,
-            barWidth: 0,
-            dotData: FlDotData(
-              show: true,
-              getDotPainter: (spot, percent, barData, index) {
-                return FlDotCirclePainter(
-                  radius: 5,
-                  color: Colors.red,
-                  strokeWidth: 1,
-                  strokeColor: Colors.white,
-                );
-              },
+  final String? sourceLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final TextTheme text = Theme.of(context).textTheme;
+    return SurfaceCard(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+        child: Row(
+          children: <Widget>[
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.2),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEnergyChart() {
-    final r = _result!;
-    int windowSize = (0.015 * r.sampleRate).round();
-    int overlap = (windowSize / 2).round();
-    double frameDuration = (windowSize - overlap) / r.sampleRate;
-
-    int step = (r.frameEnergy.length / 500).clamp(1, double.infinity).toInt();
-    List<FlSpot> spots = [];
-    for (int i = 0; i < r.frameEnergy.length; i += step) {
-      double t = i * frameDuration;
-      spots.add(FlSpot(t, r.frameEnergy[i]));
-    }
-
-    return LineChart(
-      LineChartData(
-        gridData: const FlGridData(show: true),
-        titlesData: const FlTitlesData(show: false),
-        borderData: FlBorderData(show: true),
-        extraLinesData: ExtraLinesData(
-          horizontalLines: [
-            HorizontalLine(
-              y: r.energyThreshold,
-              color: Colors.amber,
-              strokeWidth: 1.5,
-              dashArray: [5, 5],
-              label: HorizontalLineLabel(
-                show: true,
-                style: const TextStyle(
-                  color: Colors.amber,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                ),
-                labelResolver: (line) => ' Limiar',
+            const SizedBox(width: AppSpacing.lg),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('Analisando sinal acústico…', style: text.titleSmall),
+                  const SizedBox(height: 2),
+                  Text(
+                    sourceLabel ?? 'Processando arquivo WAV',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: text.bodySmall,
+                  ),
+                ],
               ),
             ),
           ],
         ),
-        lineBarsData: [
-          LineChartBarData(
-            spots: spots,
-            isCurved: false,
-            color: Colors.redAccent,
-            barWidth: 1.2,
-            dotData: const FlDotData(show: false),
-          ),
-        ],
       ),
     );
   }

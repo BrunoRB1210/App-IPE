@@ -8,7 +8,7 @@ import 'package:record/record.dart';
 /// Fases do ciclo de vida da captura de áudio.
 enum CapturePhase { idle, starting, recording, stopping }
 
-/// Categorias de falha de captura, usadas pela UI para escolher a mensagem/ação.
+/// Categorias de falha operacional de captura para tratamento na UI.
 enum CaptureErrorKind {
   permissionDenied,
   encoderUnsupported,
@@ -17,7 +17,7 @@ enum CaptureErrorKind {
   emptyRecording,
 }
 
-/// Erro operacional de captura com mensagem pronta para o usuário.
+/// Exceção tipada de captura acústica com mensagem amigável para a UI.
 class CaptureException implements Exception {
   const CaptureException(this.kind, this.message, [this.cause]);
 
@@ -30,49 +30,49 @@ class CaptureException implements Exception {
       '${cause != null ? ' — $cause' : ''}';
 }
 
-/// Encapsula o ciclo de vida do [AudioRecorder]:
-/// permissão → início → monitoramento (cronômetro/nível) → parada/cancelamento
-/// → liberação de recursos.
+/// Gerencia exclusivamente o ciclo de vida do [AudioRecorder]:
+/// permissão → alocação sob demanda → captura WAV PCM 16-bit → monitoramento →
+/// parada/cancelamento → liberação determinística da instância nativa.
 ///
-/// O arquivo entregue por [stop] é um WAV PCM 16-bit, 44,1 kHz, 2 canais —
-/// exatamente o que `AudioAnalyzer.processWavFile` (via `Wav.readFile`) espera.
+/// Nenhuma lógica de DSP ou cálculo de cadência reside aqui: o arquivo `.wav`
+/// gravado é entregue intacto ao `AudioAnalyzer.processWavFile`.
 class AudioCaptureService extends ChangeNotifier {
   AudioCaptureService();
 
-  /// Configuração de captura. Mantém os mesmos parâmetros acústicos originais
-  /// (44,1 kHz, estéreo, sem AGC/eco/supressão, fonte UNPROCESSED no Android).
+  /// Configuração acústica crua (sem AGC, sem cancelamento de eco, sem
+  /// supressão de ruído e com fonte `UNPROCESSED` no Android).
   ///
-  /// Correção: o encoder original `AudioEncoder.pcm16bits` grava PCM cru SEM
-  /// cabeçalho RIFF, o que impede `Wav.readFile` de abrir o arquivo.
-  /// `AudioEncoder.wav` grava o mesmo PCM 16-bit, porém dentro do contêiner WAV.
+  /// Usa `AudioEncoder.wav` (PCM 16-bit linear encapsulado com cabeçalho RIFF)
+  /// para compatibilidade direta com `Wav.readFile` no `AudioAnalyzer`.
   static const RecordConfig recordConfig = RecordConfig(
-    encoder: AudioEncoder.wav, // PCM 16-bit linear com cabeçalho WAV
-    sampleRate: 44100, // Amostragem de 44.1 kHz
-    numChannels: 2, // Estéreo (o analisador lê o canal 1)
-    autoGain: false, // Desativa Ganho Automático (AGC)
-    echoCancel: false, // Desativa Cancelamento de Eco
-    noiseSuppress: false, // Desativa Supressão de Ruído
-    // Configurações do Android: força áudio cru (UNPROCESSED)
+    encoder: AudioEncoder.wav,
+    sampleRate: 44100,
+    numChannels: 2,
+    autoGain: false,
+    echoCancel: false,
+    noiseSuppress: false,
     androidConfig: AndroidRecordConfig(
       audioSource: AndroidAudioSource.unprocessed,
     ),
     iosConfig: IosRecordConfig(),
   );
 
-  /// Tamanho do cabeçalho WAV canônico; arquivos deste tamanho não têm amostras.
+  /// Cabeçalho RIFF/WAV padrão possui 44 bytes; tamanhos <= 44 indicam 0 amostras.
   static const int _wavHeaderBytes = 44;
   static const double silenceDb = -160;
   static const Duration _tickInterval = Duration(milliseconds: 100);
   static const Duration _amplitudeInterval = Duration(milliseconds: 120);
 
-  /// Instanciado sob demanda: nenhum recurso nativo é alocado até a 1ª gravação.
+  /// Instância nativa alocada apenas durante uma sessão ativa e descartada ao
+  /// encerrar, prevenindo locks de microfone e vazamentos entre gravações.
   AudioRecorder? _recorder;
-  AudioRecorder get _rec => _recorder ??= AudioRecorder();
 
   final Stopwatch _stopwatch = Stopwatch();
   Timer? _ticker;
   StreamSubscription<Amplitude>? _amplitudeSub;
+  StreamSubscription<RecordState>? _stateSub;
   String? _activePath;
+  String? _interruptionMessage;
   bool _disposed = false;
 
   CapturePhase _phase = CapturePhase.idle;
@@ -85,49 +85,65 @@ class AudioCaptureService extends ChangeNotifier {
   bool get isBusy =>
       _phase == CapturePhase.starting || _phase == CapturePhase.stopping;
 
-  /// Tempo decorrido da gravação atual (ou da última, após a parada).
+  /// Tempo decorrido da captura atual (ou da última captura encerrada).
   Duration get elapsed => _elapsed;
 
   /// Nível instantâneo em dBFS (null quando indisponível).
   double? get levelDb => _levelDb;
 
-  /// Maior nível observado na gravação atual, em dBFS.
+  /// Pico máximo observado na captura atual, em dBFS.
   double get peakDb => _peakDb;
 
-  /// Nível normalizado (0–1) numa janela de 60 dB, para o medidor visual.
+  /// Nível normalizado (0.0 a 1.0) numa janela de 60 dB para feedback visual.
   double get levelFraction {
     final double? db = _levelDb;
     if (db == null) return 0;
     return ((db + 60) / 60).clamp(0.0, 1.0).toDouble();
   }
 
-  /// Solicita permissão (se necessário) e inicia a gravação em arquivo temporário.
+  /// Retorna e limpa eventual aviso de interrupção externa do sistema
+  /// (ex.: chamada telefônica ou perda de foco do microfone).
+  String? consumeInterruptionMessage() {
+    final String? msg = _interruptionMessage;
+    _interruptionMessage = null;
+    return msg;
+  }
+
+  /// Solicita permissão (se necessário) e inicia uma nova gravação temporária.
   ///
-  /// Chamadas concorrentes (toques duplos) são ignoradas enquanto a fase
-  /// não for [CapturePhase.idle].
+  /// Ignora chamadas concorrentes enquanto não estiver em [CapturePhase.idle].
   Future<void> start() async {
     if (_disposed || _phase != CapturePhase.idle) return;
+    _interruptionMessage = null;
     _setPhase(CapturePhase.starting);
 
+    final AudioRecorder recorder = _recorder ??= AudioRecorder();
+
     try {
-      final bool granted = await _rec.hasPermission();
-      if (_disposed) return;
+      final bool granted = await recorder.hasPermission();
+      if (_disposed) {
+        await _releaseRecorder();
+        return;
+      }
       if (!granted) {
         throw const CaptureException(
           CaptureErrorKind.permissionDenied,
           'Permissão de microfone negada. Libere o acesso nas configurações '
-          'do sistema para gravar.',
+          'do dispositivo para gravar os disparos.',
         );
       }
 
-      final bool supported = await _rec.isEncoderSupported(
+      final bool supported = await recorder.isEncoderSupported(
         recordConfig.encoder,
       );
-      if (_disposed) return;
+      if (_disposed) {
+        await _releaseRecorder();
+        return;
+      }
       if (!supported) {
         throw const CaptureException(
           CaptureErrorKind.encoderUnsupported,
-          'Este dispositivo não suporta gravação WAV PCM 16-bit.',
+          'Este dispositivo não suporta gravação em formato WAV PCM 16-bit.',
         );
       }
 
@@ -135,14 +151,23 @@ class AudioCaptureService extends ChangeNotifier {
       final String path =
           '${dir.path}/audio_disparos_${DateTime.now().millisecondsSinceEpoch}.wav';
 
-      if (_disposed) return;
-      _activePath = path;
-      await _rec.start(recordConfig, path: path);
+      if (_disposed) {
+        await _releaseRecorder();
+        return;
+      }
 
-      if (_disposed) return; // dispose() já liberou o gravador e o arquivo.
-      _beginMonitoring();
+      _activePath = path;
+      await recorder.start(recordConfig, path: path);
+
+      if (_disposed) {
+        await _discardActiveRecording();
+        return;
+      }
+
+      _beginMonitoring(recorder);
       _setPhase(CapturePhase.recording);
     } on CaptureException {
+      await _discardActiveRecording();
       _setPhase(CapturePhase.idle);
       rethrow;
     } catch (error) {
@@ -150,92 +175,84 @@ class AudioCaptureService extends ChangeNotifier {
       _setPhase(CapturePhase.idle);
       throw CaptureException(
         CaptureErrorKind.startFailed,
-        'Não foi possível iniciar a captura de áudio. Verifique se outro '
-        'aplicativo está usando o microfone.',
+        'Não foi possível iniciar o microfone. Verifique se outro aplicativo '
+        'está utilizando o áudio.',
         error,
       );
     }
   }
 
-  /// Finaliza a gravação e devolve o caminho do WAV gerado.
-  ///
-  /// O chamador é responsável por apagar o arquivo após a análise
-  /// (ver [deleteRecording]).
+  /// Encerra a gravação ativa, libera o hardware de captura e retorna o caminho
+  /// do arquivo `.wav` pronto para o `AudioAnalyzer.processWavFile`.
   Future<String> stop() async {
     if (_phase != CapturePhase.recording) {
-      throw StateError('stop() chamado sem gravação ativa (fase: $_phase).');
+      throw StateError('stop() chamado fora do estado de gravação ($_phase).');
     }
     _setPhase(CapturePhase.stopping);
-    _endMonitoring();
+    await _stopMonitoring();
+
+    final AudioRecorder? recorder = _recorder;
     final String? expectedPath = _activePath;
 
     try {
-      final String? output = await _rec.stop() ?? expectedPath;
+      final String? output = await recorder?.stop() ?? expectedPath;
       if (output == null) {
         throw const CaptureException(
           CaptureErrorKind.emptyRecording,
-          'Nenhum arquivo de áudio foi gerado.',
+          'Nenhum arquivo de áudio foi gerado pela captura.',
         );
       }
 
-      final File file = File(output);
-      if (!await file.exists() || await file.length() <= _wavHeaderBytes) {
-        await deleteRecording(output);
-        throw const CaptureException(
-          CaptureErrorKind.emptyRecording,
-          'A gravação está vazia. Verifique o microfone e tente novamente.',
-        );
+      if (!kIsWeb) {
+        final File file = File(output);
+        if (!await file.exists() || await file.length() <= _wavHeaderBytes) {
+          await deleteRecording(output);
+          throw const CaptureException(
+            CaptureErrorKind.emptyRecording,
+            'A gravação ficou vazia. Verifique o microfone e tente novamente.',
+          );
+        }
       }
       return output;
     } on CaptureException {
       rethrow;
     } catch (error) {
-      await _discardActiveRecording();
+      if (expectedPath != null) await deleteRecording(expectedPath);
       throw CaptureException(
         CaptureErrorKind.stopFailed,
-        'Falha ao finalizar a gravação.',
+        'Falha ao finalizar e salvar a gravação de áudio.',
         error,
       );
     } finally {
       _activePath = null;
+      await _releaseRecorder();
       _setPhase(CapturePhase.idle);
     }
   }
 
-  /// Interrompe a gravação atual descartando o arquivo.
+  /// Cancela a gravação em andamento, apaga o arquivo parcial e libera o mic.
   Future<void> cancel() async {
     if (_phase != CapturePhase.recording) return;
     _setPhase(CapturePhase.stopping);
-    _endMonitoring();
+    await _stopMonitoring();
     await _discardActiveRecording();
     _setPhase(CapturePhase.idle);
   }
 
-  /// Remove um arquivo de gravação temporário (falhas são ignoradas).
+  /// Remove com segurança um arquivo WAV temporário após o processamento.
   static Future<void> deleteRecording(String path) async {
+    if (kIsWeb) return;
     try {
       final File file = File(path);
-      if (await file.exists()) await file.delete();
-    } catch (_) {
-      // Arquivo temporário: o sistema operacional o removerá posteriormente.
-    }
-  }
-
-  Future<void> _discardActiveRecording() async {
-    final String? path = _activePath;
-    _activePath = null;
-    final AudioRecorder? recorder = _recorder;
-    if (recorder != null) {
-      try {
-        await recorder.cancel(); // Para a captura nativa e apaga o arquivo.
-      } catch (_) {
-        // O gravador pode já estar parado; segue para a limpeza do arquivo.
+      if (await file.exists()) {
+        await file.delete();
       }
+    } catch (_) {
+      // Falha benigna de limpeza em diretório temporário do SO.
     }
-    if (path != null) await deleteRecording(path);
   }
 
-  void _beginMonitoring() {
+  void _beginMonitoring(AudioRecorder recorder) {
     _elapsed = Duration.zero;
     _levelDb = null;
     _peakDb = silenceDb;
@@ -249,8 +266,7 @@ class AudioCaptureService extends ChangeNotifier {
       _notify();
     });
 
-    unawaited(_amplitudeSub?.cancel());
-    _amplitudeSub = _rec.onAmplitudeChanged(_amplitudeInterval).listen(
+    _amplitudeSub = recorder.onAmplitudeChanged(_amplitudeInterval).listen(
       (Amplitude amplitude) {
         final double db = amplitude.current;
         if (!db.isFinite) return;
@@ -258,22 +274,76 @@ class AudioCaptureService extends ChangeNotifier {
         if (db > _peakDb) _peakDb = db;
       },
       onError: (Object error, StackTrace stackTrace) {
-        // O medidor de nível é apenas informativo; a gravação continua.
         _levelDb = null;
       },
     );
+
+    _stateSub = recorder.onStateChanged().listen(
+      (RecordState state) {
+        // Se o SO interromper a gravação externamente enquanto ainda estamos
+        // em CapturePhase.recording, libera o gravador para evitar estado travado.
+        if (state == RecordState.stop && _phase == CapturePhase.recording) {
+          unawaited(_handleUnexpectedStop());
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {},
+    );
   }
 
-  void _endMonitoring() {
+  Future<void> _handleUnexpectedStop() async {
+    if (_phase != CapturePhase.recording) return;
+    _setPhase(CapturePhase.stopping);
+    await _stopMonitoring();
+    await _discardActiveRecording();
+    _interruptionMessage =
+        'A gravação foi interrompida pelo sistema operacional.';
+    _setPhase(CapturePhase.idle);
+  }
+
+  Future<void> _stopMonitoring() async {
     _ticker?.cancel();
     _ticker = null;
     if (_stopwatch.isRunning) {
       _stopwatch.stop();
       _elapsed = _stopwatch.elapsed;
     }
-    unawaited(_amplitudeSub?.cancel());
+
+    final StreamSubscription<Amplitude>? ampSub = _amplitudeSub;
+    final StreamSubscription<RecordState>? stateSub = _stateSub;
     _amplitudeSub = null;
+    _stateSub = null;
     _levelDb = null;
+
+    try {
+      await ampSub?.cancel();
+    } catch (_) {}
+    try {
+      await stateSub?.cancel();
+    } catch (_) {}
+  }
+
+  Future<void> _discardActiveRecording() async {
+    final String? path = _activePath;
+    _activePath = null;
+    final AudioRecorder? recorder = _recorder;
+    if (recorder != null) {
+      try {
+        await recorder.cancel();
+      } catch (_) {}
+    }
+    await _releaseRecorder();
+    if (path != null) {
+      await deleteRecording(path);
+    }
+  }
+
+  Future<void> _releaseRecorder() async {
+    final AudioRecorder? recorder = _recorder;
+    _recorder = null;
+    if (recorder == null) return;
+    try {
+      await recorder.dispose();
+    } catch (_) {}
   }
 
   void _setPhase(CapturePhase phase) {
@@ -288,23 +358,43 @@ class AudioCaptureService extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _endMonitoring();
+    _ticker?.cancel();
+    _ticker = null;
+    if (_stopwatch.isRunning) _stopwatch.stop();
+
+    final StreamSubscription<Amplitude>? ampSub = _amplitudeSub;
+    final StreamSubscription<RecordState>? stateSub = _stateSub;
     final AudioRecorder? recorder = _recorder;
     final String? pending = _activePath;
+
+    _amplitudeSub = null;
+    _stateSub = null;
     _recorder = null;
     _activePath = null;
-    if (recorder != null) unawaited(_release(recorder, pending));
+
+    unawaited(_disposeAsync(ampSub, stateSub, recorder, pending));
     super.dispose();
   }
 
-  /// Libera a instância nativa (para a captura, se ativa) e apaga o arquivo
-  /// pendente — evita vazamento de memória e microfone preso entre sessões.
-  static Future<void> _release(AudioRecorder recorder, String? pending) async {
+  static Future<void> _disposeAsync(
+    StreamSubscription<Amplitude>? ampSub,
+    StreamSubscription<RecordState>? stateSub,
+    AudioRecorder? recorder,
+    String? pendingPath,
+  ) async {
     try {
-      await recorder.dispose();
-    } catch (_) {
-      // Instância já liberada pelo plugin.
+      await ampSub?.cancel();
+    } catch (_) {}
+    try {
+      await stateSub?.cancel();
+    } catch (_) {}
+    if (recorder != null) {
+      try {
+        await recorder.dispose();
+      } catch (_) {}
     }
-    if (pending != null) await deleteRecording(pending);
+    if (pendingPath != null) {
+      await deleteRecording(pendingPath);
+    }
   }
 }
